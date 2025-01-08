@@ -1,0 +1,94 @@
+package spricedmeritoroutbound.Entities;
+
+import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.model.dataformat.CsvDataFormat;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+import spricedmeritoroutbound.Repository.MainRepository;
+
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.List;
+
+@Component
+public class ListPriceCanada extends RouteBuilder {
+
+    @Value("${PGP.EMAIL}")
+    private String email;
+
+    @Value("${PGP.KEY.PATH}")
+    private String pgpKeyPath;
+
+    @Value("${FILE.PATH}")
+    private String filePath;
+
+    @Value("${COMPRESSED.FILE.PATH}")
+    private String compressFilePath;
+
+    @Value("${POLL.ENRICH.SETTINGS}")
+    private String pollEnrichSetting;
+
+    @Value("${PASSPHRASE}")
+    private String passPhrase;
+
+    @Value("${SFTP.USER}")
+    private String user;
+
+    @Value("${SFTP.HOST}")
+    private String host;
+
+    @Value("${SFTP.PRIVATE.KEY}")
+    private String sftpPrivateKey;
+
+    @Value("${DESTINATION}")
+    private String destination;
+
+    @Value("${SFTP.PORT}")
+    private String sftpPort;
+
+    @Autowired
+    MainRepository repo;
+
+    @Value("${ENCRYPTED.FILE.PATH}")
+    private String encryptPath;
+
+    @Value("${PGP.KEY.PATH.ORACLE}")
+    private String oraclePgpKeyPath;
+
+    @Value("${PGP.EMAIL.ORACLE}")
+    private String oracleEmail;
+
+    @Override
+    public void configure() throws Exception {
+        SimpleDateFormat sdf=new SimpleDateFormat("yyyyMMddHHmm");
+        String date=sdf.format(new Date());
+        String fileName="OCALPRC_"+date;
+        final List<String> columnHeaders = Arrays.asList("record_action", "region", "part_no", "lprice", "fromdat");
+        String numRow=((Long)repo.getNumRowsListPriceCA()).toString();
+
+        CsvDataFormat csv = new CsvDataFormat();
+        csv.setHeader(columnHeaders);
+
+        from("cron:listPriceCA?schedule=0+00+13+*+*+?")
+                .marshal(csv)
+                .to(filePath + "?FileExist=Append&fileName=" + fileName+"_"+numRow+".csv")
+                .to("sql:SELECT (select 'R' as record_action),(select 'CA' as region),partnum as PART_NO,ROUND(lpriceca,4) AS lprice,TO_CHAR(DATE(now()),'MM/DD/YYYY') AS fromdat from list_price WHERE (DATE(updated_date) = CURRENT_DATE OR DATE(updated_date) = (CURRENT_DATE - INTERVAL '1 day')) AND partnum is not null AND lpriceca is not null?maxMessagesPerPoll=1000&outputType=StreamList&batch=true")
+                .onCompletion()
+                .onCompleteOnly()
+                .pollEnrich(filePath + "?fileName=" + fileName +"_"+numRow+".csv"+ pollEnrichSetting)
+                .marshal().gzipDeflater()//.marshal().pgp(pgpKeyPath,email,pgpPassPhrase)
+                .to(compressFilePath+"?fileName="+fileName+"_"+numRow+".csv.gz")
+                .marshal()
+                .pgp(oraclePgpKeyPath,oracleEmail)
+                .to(encryptPath+"?fileName="+fileName+"_"+numRow+".csv.gz.pgp")
+                .to(String.format("sftp://"+user+"@"+host+":"+sftpPort+destination+"?fileName="+fileName+"_"+numRow+".csv.gz.gpg&privateKeyFile="+sftpPrivateKey+"&privateKeyPassphrase="+passPhrase))                .end()
+                .split(body())
+                .streaming()
+                .marshal()
+                .csv()
+                .to(filePath + "?FileExist=Append&fileName=" + fileName+"_"+numRow+".csv")
+                .end();
+    }
+}
